@@ -7,7 +7,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -56,21 +57,28 @@ def load_model():
             df_encoded[col] = le.transform(df_encoded[col].astype(str))
             le_dict[col] = le
         
-        # 모델 학습
+        # 데이터 분할 (학습:테스트 = 8:2)
         X = df_encoded[X_columns]
         y = df_encoded['Need_Maintenance']
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
+        # 모델 학습
         model = RandomForestClassifier(n_estimators=100, random_state=42)
-        model.fit(X, y)
+        model.fit(X_train, y_train)
         
-        # 교차 검증으로 모델 정확도 계산
-        cv_scores = cross_val_score(model, X, y, cv=5)
-        model_accuracy = cv_scores.mean()
+        # 테스트 데이터에 대한 예측
+        y_pred = model.predict(X_test)
         
-        return model, X_columns, le_dict, df, categorical_columns, model_accuracy
+        # 정확도 계산
+        model_accuracy = accuracy_score(y_test, y_pred)
+        
+        # 상세 평가 지표
+        report = classification_report(y_test, y_pred, output_dict=True)
+        
+        return model, X_columns, le_dict, df, categorical_columns, model_accuracy, report
     except Exception as e:
         st.warning(f"모델 로드 중 오류 발생: {str(e)}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
 # PDF 생성 함수
 def create_prediction_pdf(prediction_result, vehicle_info, failure_probability, model_accuracy, input_data, df, X_columns, model):
@@ -346,7 +354,7 @@ if df is None:
     st.stop()
 
 # 모델 미리 로딩
-model, X_columns, le_dict, df, categorical_columns, model_accuracy = load_model()
+model, X_columns, le_dict, df, categorical_columns, model_accuracy, report = load_model()
 if model is None:
     st.warning("모델을 불러올 수 없어 예측을 수행할 수 없습니다.")
     st.stop()
@@ -438,7 +446,7 @@ elif page == "예측 결과":
         
         # 결과 표시
         st.subheader("예측 결과")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             st.metric(
@@ -455,25 +463,32 @@ elif page == "예측 결과":
             else:
                 st.success("✅ 안전")
         
-        with col3:
-            st.metric(
-                "모델 정확도",
-                f"{model_accuracy*100:.1f}%"
-            )
+        st.markdown("---")
+            
+        # 상세 평가 지표 표시
+        st.subheader("모델 평가 지표")
+        if report:
+            st.write("정비 필요 예측 (1) / 불필요 예측 (0)")
+            st.write(f"정확도 (Accuracy): {report['accuracy']*100:.1f}%")
+            st.write(f"정밀도 (Precision): {report['1']['precision']*100:.1f}%")
+            st.write(f"재현율 (Recall): {report['1']['recall']*100:.1f}%")
+            st.write(f"F1 점수: {report['1']['f1-score']*100:.1f}%")
+        
+        st.markdown("---")
         
         # 위험도 게이지 차트
         st.subheader("위험도 시각화")
         fig = go.Figure(go.Indicator(
-            mode = "gauge+number",
-            value = failure_probability * 100,
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            gauge = {
+            mode="gauge+number",
+            value=failure_probability * 100,
+            domain={'x': [0, 1], 'y': [0, 1]},
+            gauge={
                 'axis': {'range': [0, 100]},
-                'bar': {'color': "#FF4B4B"},
+                'bar': {'color': "darkblue"},
                 'steps': [
-                    {'range': [0, 40], 'color': "#00CC96"},
-                    {'range': [40, 70], 'color': "#FFA15A"},
-                    {'range': [70, 100], 'color': "#EF553B"}
+                    {'range': [0, 40], 'color': "lightgray"},
+                    {'range': [40, 70], 'color': "gray"},
+                    {'range': [70, 100], 'color': "darkgray"}
                 ],
                 'threshold': {
                     'line': {'color': "red", 'width': 4},
@@ -481,26 +496,16 @@ elif page == "예측 결과":
                     'value': 70
                 }
             },
-            title = {'text': "정비 필요 위험도 (%)"}
+            title={'text': "정비 필요 위험도 (%)"}
         ))
+        
         fig.update_layout(
             height=300,
-            margin=dict(l=20, r=20, t=50, b=20),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="white")
+            margin=dict(l=20, r=20, t=50, b=20)
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # 차량 정보 표시
-        st.subheader("입력된 차량 정보")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write(f"차량 모델: {input_data['Vehicle_Model']}")
-            st.write(f"주행거리: {input_data['Mileage']:,}km")
-            st.write(f"차량 연식: {input_data['Vehicle_Age']}년")
-            st.write(f"보고된 문제: {input_data['Reported_Issues']}건")
+        st.markdown("---")
         
         # 차량 상태 시각화
         st.subheader("차량 상태 시각화")
@@ -570,74 +575,52 @@ elif page == "예측 결과":
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # 모델 특성 중요도 시각화
-        st.subheader("모델이 중요하게 본 요인")
+        st.markdown("---")
         
-        # 입력값에 따른 상대적 중요도 계산
-        base_importances = model.feature_importances_
-        
-        # 수치형 변수만 정규화
-        numeric_cols = ['Mileage', 'Reported_Issues', 'Vehicle_Age']
-        relative_values = np.ones(len(X_columns))
-        
-        for i, col in enumerate(X_columns):
-            if col in numeric_cols:
-                # 수치형 변수는 정규화된 차이 계산
-                mean_val = df[col].mean()
-                std_val = df[col].std()
-                if std_val > 0:  # 0으로 나누기 방지
-                    relative_values[i] = abs((input_data[col] - mean_val) / std_val)
-        
-        # 상대적 중요도 계산
-        relative_importances = base_importances * relative_values
-        
-        # 중요도 데이터프레임 생성
-        importance_df = pd.DataFrame({
+        # 모델의 주요 영향 요인 시각화
+        st.subheader("주요 영향 요인")
+        feature_importance = pd.DataFrame({
             'feature': X_columns,
-            'importance': relative_importances,
-            'input_value': [input_data[f] for f in X_columns]
+            'importance': model.feature_importances_
         })
+        feature_importance = feature_importance.sort_values('importance', ascending=True)
         
-        # 중요도 상위 5개만 추출
-        top5 = importance_df.nlargest(5, 'importance')
+        # 상위 5개 특성만 선택
+        top_features = feature_importance.tail(5)
         
-        # bar chart로 시각화
-        fig_imp = go.Figure(data=[
-            go.Bar(
-                x=top5['importance'],
-                y=[f"{row['feature']}\n({row['input_value']})" for _, row in top5.iterrows()],
-                orientation='h',
-                marker_color='#FF4B4B',
-                text=[f"{v*100:.1f}%" for v in top5['importance']],
-                textposition='auto',
-            )
-        ])
-        
-        fig_imp.update_layout(
-            title='예측에 영향을 준 주요 요인 (상위 5개)',
-            xaxis_title='상대적 중요도',
-            yaxis_title='특성 (입력값)',
-            height=350,
-            margin=dict(l=20, r=20, t=50, b=20),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="white"),
+        fig = px.bar(
+            top_features,
+            x='importance',
+            y='feature',
+            orientation='h',
+            title='상위 5개 영향 요인',
+            color='importance',
+            color_continuous_scale=['lightblue', 'darkblue']
         )
         
-        st.plotly_chart(fig_imp, use_container_width=True)
+        fig.update_layout(
+            xaxis_title='중요도',
+            yaxis_title='특성',
+            showlegend=False,
+            height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
         
-        # 권장 조치사항 표시
-        st.subheader("권장 조치사항")
+        st.markdown("---")
+        
+        # 정비 필요 여부에 따른 조언
+        st.subheader("정비 조언")
         if failure_probability >= 0.7:
             st.error("""
             ⚠️ 즉시 정비가 필요합니다.
-            - 가까운 정비소에서 상세 점검을 받으시기 바랍니다.
-            - 안전을 위해 운행을 자제하시기 바랍니다.
+            - 가능한 빨리 정비소를 방문하시기 바랍니다.
+            - 운행을 최소화하고 안전한 운행을 유지하시기 바랍니다.
+            - 정비 이력과 현재 상태를 정비소에 상세히 설명하시기 바랍니다.
             """)
         elif failure_probability >= 0.4:
             st.warning("""
             ⚠️ 정비가 권장됩니다.
-            - 가까운 시일 내에 정비소 방문을 권장드립니다.
+            - 가까운 시일 내에 정비소를 방문하시기 바랍니다.
             - 정기적인 점검을 통해 상태를 모니터링하시기 바랍니다.
             """)
         else:
@@ -647,7 +630,6 @@ elif page == "예측 결과":
             - 평소와 다른 이상 징후가 발견되면 즉시 점검을 받으시기 바랍니다.
             """)
         
-        # 구분선 추가
         st.markdown("---")
         
         # 이메일로 결과 받기 섹션
@@ -657,18 +639,23 @@ elif page == "예측 결과":
         
         if st.button("결과 이메일로 받기"):
             if email:
-                prediction_result = {
-                    'probability': failure_probability,
-                    'risk_level': "High Risk" if failure_probability >= 0.7 else "Caution Required" if failure_probability >= 0.4 else "Safe",
-                    'recommendation': "Immediate maintenance required" if failure_probability >= 0.7 else "Maintenance recommended" if failure_probability >= 0.4 else "Normal condition"
-                }
-                
-                if send_prediction_email(email, prediction_result, input_data, failure_probability, model_accuracy, input_data, df, X_columns, model):
-                    st.success("예측 결과가 이메일로 전송되었습니다!")
-                else:
-                    st.error("이메일 전송에 실패했습니다. 다시 시도해주세요.")
+                try:
+                    send_prediction_email(
+                        email,
+                        "정비 필요" if failure_probability >= 0.4 else "정비 불필요",
+                        input_data,
+                        failure_probability,
+                        model_accuracy,
+                        input_df,
+                        df,
+                        X_columns,
+                        model
+                    )
+                    st.success("이메일이 성공적으로 전송되었습니다!")
+                except Exception as e:
+                    st.error(f"이메일 전송 중 오류가 발생했습니다: {str(e)}")
             else:
                 st.warning("이메일 주소를 입력해주세요.")
-        
+                
     except Exception as e:
         st.error(f"예측 중 오류가 발생했습니다: {str(e)}")
